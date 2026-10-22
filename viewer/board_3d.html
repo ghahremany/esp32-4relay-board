@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>نمای سه‌بعدی — برد Esp32 IX4 ‏۴ رله (iranic)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Tahoma, Vazirmatn, sans-serif; background: #0d1622; color: #e8edf4; min-height: 100vh; }
+  header { padding: 22px 18px 10px; text-align: center; }
+  h1 { font-size: 1.35rem; color: #7dd6a8; font-weight: 700; }
+  .sub { color: #8fa5bd; font-size: .83rem; margin-top: 6px; }
+  .panel { background: #16233a; border: 1px solid #26375a; border-radius: 14px; margin: 12px auto; padding: 10px 14px; max-width: 1060px;
+           display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px; justify-content: center; }
+  .panel label { font-size: .8rem; color: #b9c8dd; display: flex; align-items: center; gap: 7px; cursor: pointer; }
+  select, input[type=range] { accent-color: #7dd6a8; }
+  button { background: #0e1a2c; color: #e8edf4; border: 1px solid #33456b; border-radius: 8px; padding: 6px 14px; font-family: inherit; font-size: .8rem; cursor: pointer; }
+  button:hover { border-color: #7dd6a8; }
+  .cb { width: 16px; height: 16px; accent-color: #7dd6a8; cursor: pointer; }
+  .frame { max-width: 1060px; margin: 4px auto 0; background: #e9edf3; border-radius: 16px; overflow: hidden; position: relative; touch-action: none; }
+  canvas { display: block; width: 100%; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  #cap { position: absolute; bottom: 10px; right: 10px; left: 10px; pointer-events: none; text-align: center; }
+  #cap span { display: inline-block; background: rgba(13,22,34,.85); color: #7dd6a8; border-radius: 8px; padding: 5px 16px; font-size: .82rem;
+              opacity: 0; transition: opacity .2s; }
+  #cap span.show { opacity: 1; }
+  .hint { text-align: center; color: #8fa5bd; font-size: .78rem; margin: 10px 0 4px; }
+  .legend { max-width: 1060px; margin: 8px auto 30px; display: flex; flex-wrap: wrap; gap: 8px 20px; justify-content: center; }
+  .chip { display: flex; align-items: center; gap: 7px; background: #16233a; border: 1px solid #26375a; border-radius: 99px; padding: 5px 14px; font-size: .76rem; color: #c7d3e4; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; border: 1px solid rgba(255,255,255,.25); }
+</style>
+</head>
+<body>
+<header>
+  <h1>برد Esp32 IX4 ‏۴ رله — نمای سه‌بعدی بازسازی‌شده از عکس‌های رسمی</h1>
+  <div class="sub">iranicboard.ir • ابعاد ≈ ۸۰×۷۰mm • نگاشت سیلک: RL1..4 ← GPIO4/2/13/12 • رله JQC-3F(T73)‏‏۱۲V • LM2596 + AMS1117 • CH340</div>
+</header>
+
+<div class="panel">
+  <label><input type="checkbox" id="rot" class="cb"> چرخش خودکار</label>
+  <label><input type="checkbox" id="lab" class="cb"> برچسب قطعات</label>
+  <label>بزرگ‌نمایی <input type="range" id="zoom" min="40" max="240" value="100"></label>
+  <button id="rst">بازنشانی نما</button>
+</div>
+
+<div class="frame"><canvas id="cv" width="1020" height="620"></canvas><div id="cap"><span id="capt"></span></div></div>
+
+<div class="hint">چرخاندن = کشیدن • زوم = اسکرول / دو انگشت • کلیک روی قطعه = نام آن • برد را برگردانید؛ قطعات پشت برد هم هستند</div>
+
+<div class="legend" id="lg"></div>
+
+<script>
+"use strict";
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let yaw = 0.55, pitch = 0.62, zoomF = 1, running = true;
+const L = (() => { const v=[0.45,-0.75,0.49], n=Math.hypot(...v); return [v[0]/n,v[1]/n,v[2]/n]; })();
+
+function hex(c){ const n=parseInt(c.slice(1),16); return [n>>16&255, n>>8&255, n&255]; }
+function rot3(p){
+  let [x,y,z]=p;
+  const cy=Math.cos(yaw), sy=Math.sin(yaw);
+  let x1=x*cy+z*sy, z1=-x*sy+z*cy;
+  const cp=Math.cos(pitch), sp=Math.sin(pitch);
+  return [x1, y*cp-z1*sp, y*sp+z1*cp];
+}
+function boxMesh(w,h,d,ry=0){
+  const x=w/2,z=d/2, c=Math.cos(ry), s=Math.sin(ry);
+  const rot=v=>[v[0]*c+v[2]*s, v[1], -v[0]*s+v[2]*c];
+  const v=[[-x,0,-z],[x,0,-z],[x,0,z],[-x,0,z],[-x,h,-z],[x,h,-z],[x,h,z],[-x,h,z]].map(rot);
+  const f=[[0,3,2,1],[4,5,6,7],[0,4,7,3],[1,2,6,5],[0,1,5,4],[3,7,6,2]];
+  return {v,f};
+}
+function cylMesh(r,h,n=14){
+  const v=[],f=[];
+  for(let i=0;i<n;i++){const a=i/n*2*Math.PI,c=Math.cos(a)*r,s=Math.sin(a)*r;v.push([c,0,s],[c,h,s]);}
+  const bot=[],top=[];
+  for(let i=0;i<n;i++){bot.push(i*2);top.push(i*2+1);}
+  f.push(bot,top);
+  for(let i=0;i<n;i++){const j=(i+1)%n;f.push([i*2,j*2,j*2+1,i*2+1]);}
+  return {v,f};
+}
+function B(w,h,d,at,col,lb,ry=0){ return {mesh:boxMesh(w,h,d,ry), pos:at, col:hex(col), lb:lb||null}; }
+function C(r,h,at,col,lb){ return {mesh:cylMesh(r,h), pos:at, col:hex(col), lb:lb||null}; }
+
+/* ---------- layout from official annotated photo (board ~80×70mm, center origin) ---------- */
+function buildParts(){
+  const P = [];
+  /* PCB: top at y=0, 1.6 thick */
+  P.push(B(80,1.6,70,[0,-1.6,0],'#159a48','فیبر PCB ≈۸۰×۷۰mm'));
+
+  /* mounting holes */
+  for (const [x,z] of [[-37,-32],[37,-32],[-37,32],[37,32]]) {
+    P.push(C(2.6,0.35,[x,0,z],'#e9e6da', x<0&&z<0?'سوراخ مونتاژ ×۴':null));
+    P.push(C(1.4,0.45,[x,0,z],'#3d4a3d'));
+  }
+
+  const relX=[-27,-9,9,27];
+  /* screw terminals at top edge */
+  relX.forEach((x,i)=>{
+    const z=-30.8;
+    P.push(B(15,12,11,[x,0,z],'#1d6fd8', i===0?'ترمینال پیچی ۳‌پین ×۴ (وسط COM — ترتیب NO/NC با مولتی‌متر چک شود)':null));
+    for(const dx of [-5,0,5]){
+      P.push(C(1.8,0.99,[x+dx,12,z],'#cfd4da'));
+      P.push(B(2.4,0.25,0.6,[x+dx,12.9,z],'#5a6068'));
+      P.push(B(2.3,2.4,0.4,[x+dx,2.3,z+5.55],'#0b3a75'));
+    }
+  });
+  /* relays JQC-3F blue (silk labels RELAY1 D04… under each) */
+  const silk=['RELAY1 D04','RELAY2 D02','RELAY3 D13','RELAY4 D12'];
+  relX.forEach((x,i)=>{
+    P.push(B(15.5,15,19.2,[x,0,-14.6],'#1e3fa8', i===0?'رله JQC-3F(T73)‏‏۱۲V — کنタクト 10A/250VAC':null));
+    P.push(B(15.9,0.7,19.6,[x,0,-14.6],'#162f7e'));
+    P.push(B(4.5,0.05,1.0,[x,15.02,-20.5],'#dfe6ea'));   // top print strip
+    P.push(B(silk[i].length*1.15,0.05,1.1,[x,0.03,-24.9],'#dfe6ea',null));  // silk text stub
+    /* channel LED (red, between silk label row and relays) */
+    P.push(B(3.2,1.2,1.6,[x+5.8,0,-4.0],'#f2453b',i===0?'LED وضعیت رله ×۴':null));
+  });
+
+  /* FLASH + RESET buttons at top-center edge */
+  [[4.6,'کلید FLASH ‏(GPIO0)'], [-4.6,'کلید RESET ‏(EN)']].forEach(([dx,lb])=>{
+    P.push(B(3.6,2,3.6,[dx,0,-33.2],'#e5e7ea',lb));
+    P.push(B(1.9,0.8,1.9,[dx,2,-33.2],'#b9bec7'));
+  });
+
+  /* left power cluster: 2 white drum inductors */
+  [[ -27,-7,'اول'],['-27,7','دوم']].forEach(()=>{});
+  P.push(C(5.4,8,[-27,0,-7],'#efe9d8','سلف درام‌کور ×۲ ‏(باک LM2596؛ عملکرد سلف دوم از روی عکس قطعی نیست — روی نمونه فیزیکی چک کنید)'));
+  P.push(C(4.8,0.5,[-27,8,-7],'#c9bfa8'));
+  P.push(C(5.4,8,[-27,0,7],'#efe9d8'));
+  P.push(C(4.8,0.5,[-27,8,7],'#c9bfa8'));
+  /* electrolytic caps */
+  P.push(C(5,13,[-30,0,17],'#23262c','خازن‌های الکترولیتی فیلتر/باک ×۲'));
+  P.push(C(5,0.7,[-30,13,17],'#c8ccd2'));
+  P.push(C(5,11,[-19,0,17],'#23262c'));
+  P.push(C(5,0.7,[-19,11,17],'#c8ccd2'));
+  /* buck SOIC-8 + AMS1117 area */
+  P.push(B(4.9,1.8,6.2,[-13,0,-2],'#262a31','رگولاتور باک LM2596 ‏(SOIC-8/D2PAK — مارک دقیق از روی نمونه)'));
+  P.push(B(6.2,1.5,3.4,[-6,0,4],'#262a31'));
+  P.push(B(2.6,1.3,3.8,[-1.6,0,4],'#b9c3cf'));
+  P.push(B(3,0.5,3,[-13,1.8,-7],'#5f636b'));
+  /* DC jack bottom-left + power LED */
+  P.push(B(9,11,14.5,[-30.5,0,25.5],'#1b1e24','جک تغذیه ۱۲V ‏(۵٫۵mm ‏۱A به‌بالا — 24V ممنوع)'));
+  P.push(B(5.4,5.4,0.8,[-30.5,2.6,18.4],'#07090c'));
+  P.push(B(1.2,1.2,1.2,[-30.5,4.7,18.7],'#c9a44c'));
+  P.push(B(2.0,1.3,1.1,[-19.5,0,27.5],'#ffe15a','LED روشن‌بودن تغذیه'));
+  P.push(B(9,0.05,0.55,[-24,0.02,28.6],'#dfe6ea')); // iranic brand strip
+
+  /* ---- ESP32 WROOM-32 module (center-bottom) ---- */
+  const mx=9, mz=14;
+  P.push(B(18,1.0,25.5,[mx,0,mz],'#ccd2db','ماژول ESP-WROOM-32 ‏(ESP32-D0WDQ6 ‏۴MB — WiFi+BT، آنتن meander به سمت لبه)'));
+  P.push(B(16.4,1.2,23.5,[mx,1.0,mz-0.4],'#3a3d45'));
+  P.push(B(16.4,0.06,3.6,[mx,2.2,mz+9.3],'#4b4e57'));                 // antenna area on module
+  P.push(B(2.6,0.9,3.4,[mx-5.5,1.0,mz-8.5],'#aab2bd'));                 // 40MHz can on module
+  /* castellated pads left/right of module */
+  for(let i=0;i<16;i++){
+    P.push(B(1.1,0.18,1.0,[mx-9.0,0.15,mz-11.5+i*1.4],'#c9a44c',i===0?'کاستلیشن ماژول (۲×۱۶ پایه)':null));
+    P.push(B(1.1,0.18,1.0,[mx+9.0,0.15,mz-11.5+i*1.4],'#c9a44c'));
+  }
+  /* pin headers flanking module (all GPIOs out) */
+  [mx-12.3, mx+12.3].forEach((hx,c)=>{
+    P.push(B(2.6,8.6,24,[hx,0,mz],'#202830', c===0?'هدر توسعه: خروجی همه پای‌های ESP32 (۲ ردیف ۱۶تایی)':null));
+    for(let i=0;i<16;i++) P.push(B(1.0,0.25,0.9,[hx,8.6,mz-11.2+i*1.5],'#c9a44c'));
+  });
+
+  /* USB Micro on right edge (marker 5 in official numbering) */
+  P.push(B(7.6,3.2,5.6,[36,0,0],'#c9cfd8','پورت Micro USB ‏(پروگرام+سریال) — نکته: تبلیغ «Type-C» بود اما عکس رسمی شماره‌دار USB Micro نشان می‌دهد',1.5708));
+  P.push(B(1.2,2.0,3.6,[39.6,0.6,0],'#20242a',null,1.5708));
+  /* RX / TX LEDs bottom-right */
+  P.push(B(2.0,1.3,1.1,[32,0,23],'#ffd84d','LED‌های RX/TX سریال'));
+  P.push(B(2.0,1.3,1.1,[32,0,26],'#2fd65f'));
+  /* silk text: board name */
+  P.push(B(26,0.05,2.2,[0,0.02,-27.3],'#f2f5f8','سیلک «Esp32 IX4 Relay Board»'));
+  P.push(B(7,0.05,0.5,[-22,0.02,30.5],'#dfe6ea'));
+
+  /* ---- bottom side ---- */
+  const by=-1.6;
+  P.push(B(7.2,1.6,5.6,[33,by-1.6,-5],'#262a31','CH340G ‏(پشت برد، USB↔سریال UART0)'));
+  P.push(B(4.5,3.8,11.5,[28,by-3.8,-12],'#b9c3cf','کریستال ۱۲MHz CH340 (پشت برد)'));
+  relX.forEach((x,i)=>{
+    P.push(B(2.9,1.1,1.7,[x-3,by-1.1,-10],'#1d2026',i===0?'درایورهای کانال روی پشت برد: SOT-23 NPN + R بیس + دیود فلای‌بک':null));
+    P.push(B(2.0,0.6,1.25,[x,by-0.6,-10],'#4a3b2a'));
+    P.push(B(2.6,1.1,1.3,[x+3,by-1.1,-10],'#c4552a'));
+  });
+  return P;
+}
+
+/* ---------- rendering ---------- */
+let parts=[], anchors=[];
+function rebuild(){ parts = buildParts(); anchors = parts.filter(p=>p.lb).map(p=>({lb:p.lb, p:p.pos, py:p.pos[1]})); }
+
+function frame(){
+  const W=cv.width,H=cv.height;
+  ctx.fillStyle='#e9edf3'; ctx.fillRect(0,0,W,H);
+  const pts=[];
+  for(const x of [-42,42]) for(const y of [-3,17]) for(const z of [-37,37]) pts.push([x,y,z]);
+  const rp=pts.map(rot3);
+  let mnx=1e9,mxx=-1e9,mny=1e9,mxy=-1e9;
+  for(const c of rp){ mnx=Math.min(mnx,c[0]); mxx=Math.max(mxx,c[0]); mny=Math.min(mny,c[1]); mxy=Math.max(mxy,c[1]); }
+  const bw=mxx-mnx, bh=mxy-mny;
+  const sc0=Math.min((W*0.97)/bw,(H*0.94)/bh)*zoomF;
+  const cx0=(mnx+mxx)/2, cy0=(mny+mxy)/2;
+  const proj=t=>{ const k=1/(1-t[2]*0.0028); return [ W/2+(t[0]-cx0)*sc0*k, H/2-(t[1]-cy0)*sc0*k ]; };
+
+  const g0=proj(rot3([0,-2.4,0]));
+  ctx.save();
+  ctx.translate(g0[0], g0[1]+bw*sc0*0.02);
+  ctx.scale(bw*sc0*0.52, bw*sc0*0.15);
+  const g=ctx.createRadialGradient(0,0,0.55,0,0,1);
+  g.addColorStop(0,'rgba(30,40,55,0.30)'); g.addColorStop(1,'rgba(30,40,55,0)');
+  ctx.fillStyle=g; ctx.beginPath(); ctx.arc(0,0,1,0,7); ctx.fill();
+  ctx.restore();
+
+  const topView = Math.sin(pitch) > 0;
+  const faces=[];
+  for(const p of parts){
+    const py = p.pos[1];
+    if (topView && py < -1.61) continue;
+    if (!topView && py > -1.59 && p !== parts[0]) continue;
+    const m=p.mesh;
+    const tv=[];
+    for(const v of m.v){ const q=rot3([v[0]+p.pos[0], v[1]+p.pos[1], v[2]+p.pos[2]]); tv.push(q); }
+    for(const f of m.f){
+      const a=tv[f[0]],b=tv[f[1]],c=tv[f[2]];
+      const u=[b[0]-a[0],b[1]-a[1],b[2]-a[2]], w=[c[0]-b[0],c[1]-b[1],c[2]-b[2]];
+      const n=[u[1]*w[2]-u[2]*w[1], u[2]*w[0]-u[0]*w[2], u[0]*w[1]-u[1]*w[0]];
+      const nn=Math.hypot(...n)||1; const nx=n[0]/nn,ny=n[1]/nn,nz=n[2]/nn;
+      let zsum=0; for(const i of f) zsum+=tv[i][2];
+      const li=Math.max(0, nx*L[0]+ny*L[1]-nz*L[2]);
+      const s=0.45+0.55*Math.min(1,li*1.15+0.15);
+      faces.push({
+        z: zsum/f.length,
+        col:'rgb('+Math.round(Math.min(255,p.col[0]*s+18))+','+Math.round(Math.min(255,p.col[1]*s+18))+','+Math.round(Math.min(255,p.col[2]*s+18))+')',
+        pts: f.map(i=>proj(tv[i]))
+      });
+    }
+  }
+  faces.sort((a,b)=>a.z-b.z);
+  ctx.lineWidth=0.6; ctx.strokeStyle='rgba(8,14,22,.22)';
+  for(const f of faces){
+    ctx.beginPath(); ctx.moveTo(f.pts[0][0],f.pts[0][1]);
+    for(let i=1;i<f.pts.length;i++) ctx.lineTo(f.pts[i][0],f.pts[i][1]);
+    ctx.closePath(); ctx.fillStyle=f.col; ctx.fill(); ctx.stroke();
+  }
+
+  const scrAnch = anchors.map(a=>{
+    const q=rot3(a.p); const s=proj(q); return {lb:a.lb, x:s[0], y:s[1], behind:q[2]>2, py:a.py};
+  });
+
+  if (document.getElementById('lab').checked){
+    ctx.font='11px Tahoma, Arial'; ctx.textAlign='center';
+    const drawn=[];
+    for(const a of scrAnch.filter(a=>!a.behind && (topView ? a.py >= -1.6 : a.py < -1.6))){
+      let y=a.y-8;
+      for(const d of drawn){ if(Math.abs(d.y-y)<13 && Math.abs(d.x-a.x)<90) y=d.y-13; }
+      drawn.push({x:a.x,y});
+      const tw=ctx.measureText(a.lb).width+12;
+      ctx.beginPath(); ctx.arc(a.x,a.y,2.2,0,7); ctx.fillStyle='#1d4ed8'; ctx.fill();
+      ctx.strokeStyle='rgba(29,78,216,.5)'; ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(a.x,y+9); ctx.stroke();
+      ctx.fillStyle='rgba(13,22,34,.88)'; ctx.beginPath();
+      ctx.roundRect ? ctx.roundRect(a.x-tw/2,y-11,tw,15,5) : ctx.rect(a.x-tw/2,y-11,tw,15);
+      ctx.fill();
+      ctx.fillStyle='#fff'; ctx.fillText(a.lb, a.x, y);
+    }
+  }
+  return scrAnch;
+}
+let scrAnch=[];
+function render(){ scrAnch = frame(); }
+
+/* ---------- interaction ---------- */
+let drag=false, lx=0, ly=0, moved=0;
+const ptrs=new Map();
+cv.addEventListener('pointerdown',e=>{ cv.setPointerCapture(e.pointerId); ptrs.set(e.pointerId,[e.clientX,e.clientY]); if(ptrs.size===1){drag=true;lx=e.clientX;ly=e.clientY;moved=0;} });
+cv.addEventListener('pointermove',e=>{
+  if(!ptrs.has(e.pointerId)) return;
+  ptrs.set(e.pointerId,[e.clientX,e.clientY]);
+  if(ptrs.size===2){
+    const [a,b]=[...ptrs.values()];
+    const d=Math.hypot(a[0]-b[0],a[1]-b[1]);
+    if(cv._pd){ zoomF=Math.max(0.4,Math.min(2.4,zoomF*d/cv._pd)); render(); }
+    cv._pd=d; return;
+  }
+  if(!drag) return;
+  moved+=Math.abs(e.clientX-lx)+Math.abs(e.clientY-ly);
+  yaw  += (e.clientX-lx)*0.008;
+  pitch = Math.max(-1.35, Math.min(1.5, pitch + (e.clientY-ly)*0.008));
+  lx=e.clientX; ly=e.clientY; render();
+});
+function up(e){
+  ptrs.delete(e.pointerId); cv._pd=null;
+  if(ptrs.size<2) cv._pd=null;
+  if(drag && moved<8){
+    const r=cv.getBoundingClientRect();
+    const x=(e.clientX-r.left)*cv.width/r.width, y=(e.clientY-r.top)*cv.height/r.height;
+    let best=null,bd=1e9;
+    const tv=Math.sin(pitch)>0;
+    for(const a of scrAnch){ if(a.behind) continue; if(tv ? a.py < -1.6 : a.py >= -1.6) continue; const d=Math.hypot(a.x-x,a.y-y); if(d<bd){bd=d;best=a;} }
+    const cap=document.getElementById('capt');
+    if(best && bd<40){ cap.textContent=best.lb; cap.classList.add('show'); }
+    else cap.classList.remove('show');
+  }
+  drag=false;
+}
+cv.addEventListener('pointerup',up);
+cv.addEventListener('pointercancel',up);
+cv.addEventListener('wheel',e=>{ e.preventDefault(); zoomF=Math.max(0.4,Math.min(2.4,zoomF*(e.deltaY>0?0.9:1.1))); render(); },{passive:false});
+cv.addEventListener('dblclick',()=>{ reset(); });
+
+function reset(){ yaw=0.55; pitch=0.62; zoomF=1; document.getElementById('zoom').value=100; render(); }
+document.getElementById('rst').onclick=reset;
+document.getElementById('zoom').oninput=e=>{ zoomF=e.target.value/100; render(); };
+document.getElementById('lab').onchange=render;
+document.getElementById('rot').onchange=e=>{ running=e.target.checked; if(running) requestAnimationFrame(tick); };
+function tick(){ if(running){ yaw+=0.006; render(); requestAnimationFrame(tick);} }
+
+document.getElementById('lg').innerHTML = [
+  ['#159a48','فیبر PCB'],['#1e3fa8','رله JQC-3F ‏۱۲V'],['#1d6fd8','ترمینال خروجی'],['#ccd2db','ماژول ESP-WROOM-32'],
+  ['#efe9d8','سلف درام‌کور'],['#c9cfd8','USB Micro'],['#1b1e24','جک ۱۲V + خازن‌ها'],
+  ['#f2453b','LED رله'],['#202830','هدرهای توسه'],['#262a31','LM2596 / CH340 / درایورها']
+].map(([c,t])=>'<span class="chip"><span class="dot" style="background:'+c+'"></span>'+t+'</span>').join('');
+
+rebuild(); render(); running=false;
+</script>
+</body>
+</html>
